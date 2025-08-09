@@ -1,0 +1,218 @@
+//@version=6
+strategy("HTF/LTF Elliott Wave Strategy", overlay=true, margin_long=100, margin_short=100, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Inputs ===
+// Timeframes
+htf_tf = input.timeframe("60", "Higher timeframe for waves")
+
+// Pivot sensitivity
+pivotLeft  = input.int(2, "Pivot left bars", minval=1)
+pivotRight = input.int(2, "Pivot right bars", minval=1)
+
+// Fibonacci rules
+fib2Min = input.float(0.382, "Wave2 retr min")
+fib2Max = input.float(0.786, "Wave2 retr max")
+fib3Min = input.float(1.618, "Wave3 ext min")
+fib4Min = input.float(0.236, "Wave4 retr min")
+fib4Max = input.float(0.382, "Wave4 retr max")
+fib5Min = input.float(0.618, "Wave5 ext min")
+fib5Max = input.float(1.0,   "Wave5 ext max")
+
+// Trend inputs
+emaFastLen = input.int(50, "EMA Fast")
+emaSlowLen = input.int(200, "EMA Slow")
+adxLen = input.int(14, "ADX length")
+adxThreshold = input.float(20.0, "ADX threshold")
+
+// Momentum inputs
+rsiLen = input.int(14, "RSI length")
+macdFast = input.int(12, "MACD fast")
+macdSlow = input.int(26, "MACD slow")
+macdSignal = input.int(9, "MACD signal")
+
+// Volume inputs
+volLen = input.int(20, "Volume SMA length")
+volMult = input.float(1.5, "Volume multiplier")
+obvLen = input.int(20, "OBV MA length")
+
+// Pullback pattern
+patternBars = input.int(3, "Pullback bars")
+patternEmaLen = input.int(20, "Pullback EMA")
+
+// === LTF Confluence ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+[_, _, adxVal] = ta.dmi(adxLen, adxLen)
+trendBull = emaFast > emaSlow and close > emaFast and close > emaSlow and adxVal > adxThreshold
+trendBear = emaFast < emaSlow and close < emaFast and close < emaSlow and adxVal > adxThreshold
+
+rsiVal = ta.rsi(close, rsiLen)
+[macdLine, macdSignalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+momentumBull = rsiVal > 50 and rsiVal > rsiVal[1] and macdLine > macdSignalLine
+momentumBear = rsiVal < 50 and rsiVal < rsiVal[1] and macdLine < macdSignalLine
+
+volMA = ta.sma(volume, volLen)
+obv = ta.cum(close > close[1] ? volume : close < close[1] ? -volume : 0)
+obvMA = ta.sma(obv, obvLen)
+volumeBull = volume > volMA * volMult and obv > obvMA
+volumeBear = volume > volMA * volMult and obv < obvMA
+
+pullEma = ta.ema(close, patternEmaLen)
+pullbackBull = ta.lowest(close, patternBars) < pullEma and close > pullEma
+pullbackBear = ta.highest(close, patternBars) > pullEma and close < pullEma
+
+ltfBull = trendBull and momentumBull and volumeBull and pullbackBull
+ltfBear = trendBear and momentumBear and volumeBear and pullbackBear
+
+// === HTF Pivot Detection ===
+htfHigh = request.security(syminfo.tickerid, htf_tf, high)
+htfLow  = request.security(syminfo.tickerid, htf_tf, low)
+
+ph = request.security(syminfo.tickerid, htf_tf, ta.pivothigh(high, pivotLeft, pivotRight))
+pl = request.security(syminfo.tickerid, htf_tf, ta.pivotlow(low, pivotLeft, pivotRight))
+htfTime = request.security(syminfo.tickerid, htf_tf, time)
+
+var int lastHighTime = na
+var int lastLowTime = na
+var float[] pv_price = array.new_float()
+var int[]   pv_type  = array.new_int()
+var int[]   pv_bar   = array.new_int()
+
+newHigh = not na(ph) and (na(lastHighTime) or htfTime != lastHighTime)
+newLow  = not na(pl) and (na(lastLowTime) or htfTime != lastLowTime)
+
+if newHigh
+    lastHighTime := htfTime
+    array.push(pv_price, ph)
+    array.push(pv_type, 1)
+    array.push(pv_bar, bar_index)
+if newLow
+    lastLowTime := htfTime
+    array.push(pv_price, pl)
+    array.push(pv_type, -1)
+    array.push(pv_bar, bar_index)
+
+// keep only last 5 pivots
+while array.size(pv_price) > 5
+    array.shift(pv_price)
+    array.shift(pv_type)
+    array.shift(pv_bar)
+
+// === Helper functions ===
+wav3Bull(p0, p1, p2) =>
+    wave1 = p1 - p0
+    retr = (p1 - p2) / wave1
+    p2 > p0 and retr >= fib2Min and retr <= fib2Max
+
+wav3Bear(p0, p1, p2) =>
+    wave1 = p0 - p1
+    retr = (p2 - p1) / wave1
+    p2 < p0 and retr >= fib2Min and retr <= fib2Max
+
+wav5Bull(p0, p1, p2, p3, p4) =>
+    wave1 = p1 - p0
+    wave3 = p3 - p2
+    retr2 = (p1 - p2) / wave1
+    retr4 = (p3 - p4) / wave3
+    ext3 = wave3 / wave1
+    p2 > p0 and p4 > p1 and retr2 >= fib2Min and retr2 <= fib2Max and ext3 >= fib3Min and retr4 >= fib4Min and retr4 <= fib4Max and wave3 > wave1
+
+wav5Bear(p0, p1, p2, p3, p4) =>
+    wave1 = p0 - p1
+    wave3 = p2 - p3
+    retr2 = (p2 - p1) / wave1
+    retr4 = (p4 - p3) / wave3
+    ext3 = wave3 / wave1
+    p2 < p0 and p4 < p1 and retr2 >= fib2Min and retr2 <= fib2Max and ext3 >= fib3Min and retr4 >= fib4Min and retr4 <= fib4Max and wave3 > wave1
+
+// === Wave Detection ===
+size = array.size(pv_price)
+var int entryWave = 0
+
+bullWave3 = false
+bearWave3 = false
+bullWave5 = false
+bearWave5 = false
+
+if size >= 3
+    p0 = array.get(pv_price, size-3)
+    t0 = array.get(pv_type, size-3)
+    p1v = array.get(pv_price, size-2)
+    t1 = array.get(pv_type, size-2)
+    p2v = array.get(pv_price, size-1)
+    t2 = array.get(pv_type, size-1)
+    bullWave3 := t0 == -1 and t1 == 1 and t2 == -1 and wav3Bull(p0, p1v, p2v)
+    bearWave3 := t0 == 1 and t1 == -1 and t2 == 1 and wav3Bear(p0, p1v, p2v)
+    if bullWave3
+        label.new(array.get(pv_bar, size-2), p1v, "1", style=label.style_label_down, color=color.new(color.green,0))
+        label.new(array.get(pv_bar, size-1), p2v, "2", style=label.style_label_up, color=color.new(color.green,0))
+    if bearWave3
+        label.new(array.get(pv_bar, size-2), p1v, "-1", style=label.style_label_up, color=color.new(color.red,0))
+        label.new(array.get(pv_bar, size-1), p2v, "-2", style=label.style_label_down, color=color.new(color.red,0))
+
+if size >= 5
+    p0 = array.get(pv_price, size-5)
+    t0 = array.get(pv_type, size-5)
+    p1v = array.get(pv_price, size-4)
+    t1 = array.get(pv_type, size-4)
+    p2v = array.get(pv_price, size-3)
+    t2 = array.get(pv_type, size-3)
+    p3v = array.get(pv_price, size-2)
+    t3 = array.get(pv_type, size-2)
+    p4v = array.get(pv_price, size-1)
+    t4 = array.get(pv_type, size-1)
+    bullWave5 := t0 == -1 and t1 == 1 and t2 == -1 and t3 == 1 and t4 == -1 and wav5Bull(p0,p1v,p2v,p3v,p4v)
+    bearWave5 := t0 == 1 and t1 == -1 and t2 == 1 and t3 == -1 and t4 == 1 and wav5Bear(p0,p1v,p2v,p3v,p4v)
+    if bullWave5
+        label.new(array.get(pv_bar, size-2), p3v, "3", style=label.style_label_down, color=color.new(color.green,0))
+        label.new(array.get(pv_bar, size-1), p4v, "4", style=label.style_label_up, color=color.new(color.green,0))
+    if bearWave5
+        label.new(array.get(pv_bar, size-2), p3v, "-3", style=label.style_label_up, color=color.new(color.red,0))
+        label.new(array.get(pv_bar, size-1), p4v, "-4", style=label.style_label_down, color=color.new(color.red,0))
+
+// === Entry Logic ===
+if bullWave3 and ltfBull
+    strategy.entry("L3", strategy.long)
+    entryWave := 3
+    alert("Bullish Wave 3 Entry Detected", alert.freq_once_per_bar_close)
+if bullWave5 and ltfBull
+    strategy.entry("L5", strategy.long)
+    entryWave := 5
+    alert("Bullish Wave 5 Entry Detected", alert.freq_once_per_bar_close)
+if bearWave3 and ltfBear
+    strategy.entry("S3", strategy.short)
+    entryWave := -3
+    alert("Bearish Wave 3 Entry Detected", alert.freq_once_per_bar_close)
+if bearWave5 and ltfBear
+    strategy.entry("S5", strategy.short)
+    entryWave := -5
+    alert("Bearish Wave 5 Entry Detected", alert.freq_once_per_bar_close)
+
+// === Exit Logic ===
+if strategy.position_size > 0 and (not na(ph) and newHigh)
+    if entryWave == 3
+        label.new(bar_index, ph, "3", style=label.style_label_down, color=color.new(color.green,0))
+        strategy.close("L3")
+    if entryWave == 5
+        label.new(bar_index, ph, "5", style=label.style_label_down, color=color.new(color.green,0))
+        strategy.close("L5")
+    entryWave := 0
+
+if strategy.position_size < 0 and (not na(pl) and newLow)
+    if entryWave == -3
+        label.new(bar_index, pl, "-3", style=label.style_label_up, color=color.new(color.red,0))
+        strategy.close("S3")
+    if entryWave == -5
+        label.new(bar_index, pl, "-5", style=label.style_label_up, color=color.new(color.red,0))
+        strategy.close("S5")
+    entryWave := 0
+
+// === Background Coloring ===
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red,90) : na)
+
+// === Alerts ===
+alertcondition(bullWave3 and ltfBull, "Bullish Wave 3 Entry Detected")
+alertcondition(bullWave5 and ltfBull, "Bullish Wave 5 Entry Detected")
+alertcondition(bearWave3 and ltfBear, "Bearish Wave 3 Entry Detected")
+alertcondition(bearWave5 and ltfBear, "Bearish Wave 5 Entry Detected")
+
